@@ -13,164 +13,851 @@ GeoConvert.decode.utf8 = new TextDecoder("utf-8");
 GeoConvert.decode.big5 = new TextDecoder("big5");
 ;
 (function(window, document, undefined) {
+	//code index
+	var codeIndex = {
+		"1": "text",
+		"2": "name",
+		"5": "handle",
+		"6": "linetypeName",
+		"7": "textStyleName",
+		"8": "layerName",
+		"10": "lowerLeftCorner",
+		"11": "upperRightCorner",
+		"12": "centerDcs",
+		"13": "snapBasePoint",
+		"14": "snapSpacing",
+		"15": "gridSpacing",
+		"16": "viewDirectionFromTarget",
+		"17": "viewTarget",
+		"39": "thickness",
+		"48": "linetypeScale",
+		"50": "textRotation",
+		"51": "textOblique",
+		"60": "visibility",
+		"62": "colorNumber",
+		"70": "closed"
+	};
 
-  //xml2json
-  GeoConvert.xml2Json = function(xml, toString) {
-    //xml string parser
-    var parseXml;
 
-    if (window.DOMParser) {
-      parseXml = function(xmlStr) {
-        return (new window.DOMParser()).parseFromString(xmlStr, "text/xml");
-      };
-    } else if (typeof window.ActiveXObject != "undefined" && new window.ActiveXObject("Microsoft.XMLDOM")) {
-      parseXml = function(xmlStr) {
-        var xmlDoc = new window.ActiveXObject("Microsoft.XMLDOM");
-        xmlDoc.async = "false";
-        xmlDoc.loadXML(xmlStr);
-        return xmlDoc;
-      };
-    } else {
-      parseXml = function() {
-        return null;
-      }
-    }
+	//dxf2Geojson. file is dxf text.
+	GeoConvert.dxf2Geojson = function(file, toString) {
+		var geojson = dxfHandle(file);
 
-    //check string?
-    var xmlDoc;
+		if (toString) {
+			var jsonString = JSON.stringify(geojson);
+			return jsonString;
+		} else {
+			return geojson;
+		}
+	};
 
-    if (typeof xml === "string") {
-      xmlDoc = parseXml(xml);
-    } else if (typeof xml === "object" && xml.xmlVersion) {
-      xmlDoc = xml;
+	function Transitions(fromProjection, toProjection) {
+		this.fromProjection = fromProjection;
+		this.toProjection = toProjection;
+	}
+
+	Transitions.prototype.trans = function(coordinates) {
+		return proj4(this.fromProjection, this.toProjection, coordinates);
+	}
+
+	function dxfHandle(file) {
+		if (file.dxf !== undefined) {
+			var geojson = GeoConvert.emptyGeojson();
+
+			//prj
+			var projection = file.prj;
+			var transitions = projection && !/GCS_WGS_1984|WGS84/g.test(projection) ? new Transitions(projection, proj4.WGS84) : transitions;
+
+			//dxf
+			var dxf = readDxfText(file.dxf);
+
+			//geojson
+			var geojson = dxfObject2Geojson(dxf, transitions);
+
+			return geojson;
+		} else {
+			throw new Error("need dxf file");
+		}
+	}
+
+	function readDxfText(dxfText) {
+		var dxfArray = dxfText.split(/\r\n|\r|\n/g);
+		var dxf = {};
+
+		// HEADER
+		var headerStart = dxfArray.indexOf("HEADER");
+		var headerEnd = dxfArray.indexOf("ENDSEC", headerStart) + 1;
+		var headerArray = dxfArray.slice(headerStart, headerEnd);
+		dxf.header = readDxfHeader(headerArray);
+
+		// TABLES
+		var tablesStart = dxfArray.indexOf("TABLES");
+		var tablesEnd = dxfArray.indexOf("ENDSEC", tablesStart) + 1;
+		var tablesArray = dxfArray.slice(tablesStart, tablesEnd);
+		dxf.tables = readDxfTables(tablesArray);
+
+		// BLOCKS
+		var blocksStart = dxfArray.indexOf("BLOCKS");
+		var blocksEnd = dxfArray.indexOf("ENDSEC", blocksStart) + 1;
+		var blocksArray = dxfArray.slice(blocksStart, blocksEnd);
+		dxf.blocks = readDxfBlocks(blocksArray);
+
+		// ENTITIES
+		var entitiesStart = dxfArray.indexOf("ENTITIES");
+		var entitiesEnd = dxfArray.indexOf("ENDSEC", entitiesStart) + 1;
+		var entitiesArray = dxfArray.slice(entitiesStart, entitiesEnd);
+		dxf.entities = readDxfEntities(entitiesArray);
+
+		return dxf;
+	}
+
+	//origin point of dxf
+	function readDxfPoints(data, start, x, y, z) {
+		var points = {};
+		points.x = readGroupValue(x, data[start]);
+		points.y = readGroupValue(y, data[start + 2]);
+
+		if (z !== undefined) {
+			points.z = readGroupValue(z, data[start + 4]);
+		}
+		return points;
+	}
+
+	// //point of geojson
+	// function readDxfPoints(data, start, x, y, z) {
+	// 	var x = readGroupValue(x, data[start]);
+	// 	var y = readGroupValue(y, data[start + 2]);
+	// 	var points = [x, y];
+
+	// 	return points;
+	// }
+
+	function readDxfHeader(headerArray) {
+		var imax = headerArray.length;
+		var i = 0;
+		var header = {};
+
+		while (i < imax) {
+			var code = headerArray[i].trim();
+			if (code === "9") {
+				var key = headerArray[i + 1];
+				var valueCode = headerArray[i + 2].trim();
+				if (valueCode === "10") {
+					var points = {};
+					var start = i + 3;
+					if (headerArray[i + 6].trim() === "30") {
+						points = readDxfPoints(headerArray, start, 10, 20, 30);;
+						i = i + 8;
+					} else {
+						points = readDxfPoints(headerArray, start, 10, 20);
+						i = i + 6;
+					}
+					header[key] = points;
+				} else {
+					header[key] = readGroupValue(parseInt(valueCode), headerArray[i + 3]);
+					i = i + 4;
+				}
+			} else {
+				i++;
+			}
+		}
+
+		return header;
+	}
+
+	function readDxfTable(tableArray, index) {
+		var length = tableArray.length - 2;
+		var table = {};
+		var code, value, name;
+
+		while (index < length) {
+			code = tableArray[index].trim();
+			value = tableArray[index + 1].trim();
+
+			switch (code) {
+				case "0":
+					var start = index + 2;
+					var end = tableArray.indexOf(name, start) + 1 || length;
+					var children = tableArray.slice(start, end - 2);
+					table[value] = table[value] || [];
+					table[value].push(readDxfTable(children, 0));
+					index = end - 4;
+					break;
+				case "2":
+					name = value;
+					table.name = value;
+					break;
+				case "3":
+					table.description = value;
+					break;
+				case "5":
+					table.handle = value;
+					break;
+				case "10":
+				case "11":
+				case "12":
+				case "13":
+				case "14":
+				case "15":
+					var start = index + 1;
+					var x = parseInt(code);
+					table[codeIndex[code]] = readDxfPoints(tableArray, start, x, x + 10);
+					break;
+				case "16":
+				case "17":
+					var start = index + 1;
+					var x = parseInt(code);
+					table[codeIndex[code]] = readDxfPoints(tableArray, start, x, x + 10, x + 20);
+					break;
+				case "40":
+					table.patternLength = parseFloat(value);
+					break;
+				case "49":
+					table.elements.push(parseFloat(value));
+					break;
+				case "62":
+					table.color = parseInt(value);
+					break;
+				case "73":
+					table.elements = [];
+					break;
+				case "330":
+				case "360":
+					table.ownerHandle = value;
+					break;
+			}
+			index = index + 2;
+		}
+		return table;
+	}
+
+	function readDxfTables(tablesArray) {
+		var imax = tablesArray.length;
+		var i = 0;
+		var tables = {};
+
+		while (i < imax) {
+			var tableStart = tablesArray.indexOf("TABLE", i);
+			var tableEnd = tablesArray.indexOf("ENDTAB", tableStart) + 1;
+
+			if (tableEnd !== 0) {
+				var tableArray = tablesArray.slice(tableStart, tableEnd);
+				tables[tablesArray[tableStart + 2]] = readDxfTable(tableArray, 1);
+				i = tableEnd;
+			} else {
+				i = imax + 1;
+			}
+		}
+
+		return tables;
+	}
+
+	function readDxfBlock(blockArray, index) {
+		var length = blockArray.length - 2;
+		var block = {};
+		var code, value;
+
+		while (index < length) {
+			code = blockArray[index].trim();
+			value = blockArray[index + 1].trim();
+
+			switch (code) {
+				case "0":
+					var end = blockArray.indexOf("  0", index + 2) + 1 || length;
+					var children = blockArray.slice(index, end - 1);
+
+					block.entities = block.entities || [];
+					block.entities.push(readDxfEntity(children, 0));
+					index = end - 3;
+					break;
+				case "1":
+					block.xrefName = value;
+					break;
+				case "2":
+					block.name = value;
+					break;
+				case "3":
+					block.blockName = value;
+					break;
+				case "5":
+					block.handle = value;
+					break;
+				case "8":
+					block.layerName = value;
+					break;
+				case "10":
+					var start = index + 1;
+					block.basePoint = readDxfPoints(blockArray, start, 10, 20, 30);
+					break;
+				case "330":
+					block.ownerHandle = value;
+					break;
+				case "360":
+					table.ownerHandle = value;
+					break;
+			}
+
+			index = index + 2;
+		}
+		return block;
+	}
+
+	function readDxfBlocks(blocksArray) {
+		var imax = blocksArray.length;
+		var i = 0;
+		var blocks = {};
+
+		while (i < imax) {
+			var blockStart = blocksArray.indexOf("BLOCK", i);
+			var blockEnd = blocksArray.indexOf("ENDBLK", blockStart) + 1;
+
+			if (blockEnd !== 0) {
+				var blockArray = blocksArray.slice(blockStart, blockEnd);
+
+				var block = readDxfBlock(blockArray, 1);
+				blocks[block.blockName] = block;
+				i = blockEnd;
+			} else {
+				i = imax + 1;
+			}
+		}
+
+		return blocks;
+	}
+
+	function readDxfEntity(entityArray, index) {
+		var length = entityArray.length;
+		var entity = {};
+		var code, value, type;
+		var edgeType = false;
+
+		while (index < length) {
+			code = entityArray[index].trim();
+			value = entityArray[index + 1].trim();
+
+			switch (code) {
+				case "0":
+					type = value;
+					entity.entityType = value;
+					break;
+				case "1":
+				case "5":
+				case "6":
+				case "7":
+				case "8":
+					entity[codeIndex[code]] = value;
+					break;
+				case "10":
+					var start = index + 1;
+					switch (type) {
+						case "HATCH":
+							if (edgeType) {
+								var vertices = entity.multiVertices[entity.multiVertices.length - 1];
+								if (entity.verticesNumber > vertices.length) {
+									var point = readDxfPoints(entityArray, start, 10, 20);
+									var lastPoint = vertices[vertices.length - 1];
+									if (lastPoint === undefined || (lastPoint.x !== point.x && lastPoint.y !== point.y)) {
+										vertices.push(point);
+									}
+								}
+							}
+							break;
+						case "LWPOLYLINE":
+							entity.vertices = entity.vertices || [];
+							entity.vertices.push(readDxfPoints(entityArray, start, 10, 20));
+							break;
+						case "POINT":
+						case "MTEXT":
+						case "XLINE":
+							entity.point = readDxfPoints(entityArray, start, 10, 20, 30);
+							break;
+						case "TEXT":
+						case "LINE":
+							entity.startPoint = readDxfPoints(entityArray, start, 10, 20, 30);
+							break;
+					}
+
+					break;
+				case "11":
+					var start = index + 1;
+					switch (type) {
+						case "HATCH":
+							if (edgeType) {
+								var vertices = entity.multiVertices[entity.multiVertices.length - 1];
+								vertices.push(readDxfPoints(entityArray, start, 11, 21));
+							}
+							edgeType = false;
+							break;
+						case "TEXT":
+						case "LINE":
+							entity.endPoint = readDxfPoints(entityArray, start, 10, 20, 30);
+							break;
+					}
+
+					break;
+				case "39":
+				case "48":
+				case "50":
+				case "51":
+					entity[codeIndex[code]] = parseFloat(value);
+					break;
+				case "40":
+					switch (type) {
+						case "TEXT":
+							entity.textHeight = parseFloat(value);
+							break;
+						case "ARC":
+						case "CIRCLE":
+							entity.radius = parseFloat(value);
+							break;
+					}
+					break;
+				case "60":
+				case "62":
+				case "70":
+					entity[codeIndex[code]] = parseInt(value);
+					break;
+				case "72":
+					if (value === "1" || value === "0") {
+						edgeType = true;
+					}
+					break;
+				case "91":
+					entity.multiVertices = [];
+					break;
+				case "93":
+					entity.verticesNumber = parseInt(value);
+					entity.multiVertices.push([]);
+					break;
+				case "330":
+					entity.ownerHandle = value;
+					break;
+			}
+
+			index = index + 2;
+		}
+		return entity;
+	}
+
+	function readDxfEntities(entitiesArray) {
+		var imax = entitiesArray.length;
+		var i = 0;
+		var entities = [];
+
+		while (i < imax) {
+			var entityStart = entitiesArray.indexOf("  0", i);
+			var entityEnd = entitiesArray.indexOf("  0", entityStart + 1);
+
+			if (entityEnd !== -1) {
+				var entityArray = entitiesArray.slice(entityStart, entityEnd);
+
+				var entity = readDxfEntity(entityArray, 0);
+				entities.push(entity);
+				i = entityEnd;
+			} else {
+				i = imax + 1;
+			}
+		}
+
+		return entities;
+	}
+
+	function readGroupValue(code, value) {
+		if (code <= 9) {
+			return value;
+		} else if (code >= 10 && code <= 59) {
+			return parseFloat(value);
+		} else if (code >= 60 && code <= 99) {
+			return parseInt(value);
+		} else if (code >= 100 && code <= 109) {
+			return value;
+		} else if (code >= 110 && code <= 149) {
+			return parseFloat(value);
+		} else if (code >= 160 && code <= 179) {
+			return parseInt(value);
+		} else if (code >= 210 && code <= 239) {
+			return parseFloat(value);
+		} else if (code >= 270 && code <= 289) {
+			return parseInt(value);
+		} else if (code >= 290 && code <= 299) {
+			return !!parseInt(value);
+		} else if (code >= 300 && code <= 369) {
+			return value;
+		} else if (code >= 370 && code <= 389) {
+			return parseInt(value);
+		} else if (code >= 390 && code <= 399) {
+			return value;
+		} else if (code >= 400 && code <= 409) {
+			return parseInt(value);
+		} else if (code >= 410 && code <= 419) {
+			return value;
+		} else if (code >= 420 && code <= 429) {
+			return parseInt(value);
+		} else if (code >= 430 && code <= 439) {
+			return value;
+		} else if (code >= 440 && code <= 459) {
+			return parseInt(value);
+		} else if (code >= 460 && code <= 469) {
+			return parseFloat(value);
+		} else if (code >= 470 && code <= 481) {
+			return value;
+		} else if (code === 999) {
+			return value;
+		} else if (code >= 1000 && code <= 1009) {
+			return value;
+		} else if (code >= 1010 && code <= 1059) {
+			return parseFloat(value);
+		} else if (code >= 1060 && code <= 1071) {
+			return parseInt(value);
+		} else {
+			return value;
+		}
+	}
+
+	function dxf2GeojsonPoint(point, transitions) {
+		var point = transitions ? transitions.trans([point.x, point.y]) : [point.x, point.y];
+		return point;
+	}
+
+	function dxf2GeojsonPolyline(polyline, transitions) {
+		var lineString = [];
+		if (polyline === undefined)
+			var cc = 123;
+		polyline.forEach(function(point) {
+			lineString.push(dxf2GeojsonPoint(point, transitions));
+		});
+		return lineString;
+	}
+
+	function dxfEntity2Feature(entity, transitions) {
+		var geometry = {};
+		switch (entity.entityType) {
+			case "ARC":
+				break;
+			case "CIRCLE":
+				break;
+			case "INSERT":
+				break;
+			case "TEXT":
+				geometry.type = "Point";
+				geometry.coordinates = dxf2GeojsonPoint(entity.startPoint, transitions);
+				break;
+			case "LINE":
+				geometry.type = "LineString";
+				geometry.coordinates = dxf2GeojsonPolyline([entity.startPoint, entity.endPoint], transitions);
+				break;
+			case "LWPOLYLINE":
+				geometry.type = "LineString";
+				geometry.coordinates = dxf2GeojsonPolyline(entity.vertices, transitions);
+				if (entity.closed === 1) {
+					geometry.coordinates.push(geometry.coordinates[0]);
+				}
+				break;
+			case "HATCH":
+				geometry.type = "Polygon";
+				geometry.coordinates = [];
+				entity.multiVertices.forEach(function(vertices) {
+					var coordinates = dxf2GeojsonPolyline(vertices, transitions);
+					coordinates.push(coordinates[0]);
+					geometry.coordinates.push(coordinates);
+				});
+				break;
+			default:
+				break;
+		}
+
+		if (geometry.type !== undefined) {
+			var feature = {};
+			feature.type = "Feature";
+			feature.geometry = geometry;
+			feature.properties = {};
+			feature.style = {};
+
+			[
+				"text",
+				"textHeight",
+				"textStyleName",
+				"layerName",
+				"entityType"
+			].forEach(function(name) {
+				if (entity[name] !== undefined) {
+					feature.properties[name] = entity[name];
+				}
+			});
+
+			return feature;
+		}
+	}
+
+	function dxfObject2Geojson(dxf, transitions) {
+		console.log(dxf);
+
+		var geojson = GeoConvert.emptyGeojson();
+
+		//blocks
+		for (var key in dxf.blocks) {
+			var block = dxf.blocks[key];
+			var entities = block.entities;
+
+			if (entities !== undefined) {
+				entities.forEach(function(entity) {
+					var feature = dxfEntity2Feature(entity, transitions);
+					if (feature !== undefined) {
+						geojson.features.push(feature);
+					}
+				});
+			}
+		}
+
+		//entities
+		dxf.entities.forEach(function(entity) {
+			var feature = dxfEntity2Feature(entity, transitions);
+			if (feature !== undefined) {
+				geojson.features.push(feature);
+			}
+		});
+
+		return geojson;
+	}
+})(window, document);
+
+;
+(function(window, document, undefined) {
+  //gpx2geojson
+  GeoConvert.gpx2Geojson = function(gpx, toString) {
+    var json;
+
+    if (typeof gpx === "string") {
+      json = GeoConvert.xml2Json(gpx);
+    } else if (typeof gpx === "object" && gpx.xmlVersion) {
+      json = GeoConvert.xml2Json(gpx);
     } else {
       throw new Error("Unsupported input type");
     }
 
-    var json = xmlElement2JsonObject(xmlDoc);
+    var geojson = GeoConvert.emptyGeojson();
+    gpxElementHandle("gpx", json.gpx, geojson);
 
     if (toString) {
-      var jsonString = JSON.stringify(json);
+      var jsonString = JSON.stringify(geojson);
       return jsonString;
     } else {
-      return json;
+      return geojson;
     }
   };
 
-  function xmlElement2JsonObject(xmlElement) {
-    var json = {};
-
-    if (xmlElement.attributes) {
-      for (var i = 0, imax = xmlElement.attributes.length; i < imax; i++) {
-        var attribute = xmlElement.attributes[i];
-        var nodeValue = attribute.nodeValue;
-        var value = (!isNaN(parseFloat(nodeValue)) && isFinite(nodeValue)) ? parseFloat(nodeValue) : nodeValue;
-        json["@" + attribute.nodeName] = value;
-      }
-    }
-
-    if (xmlElement.children.length > 0) {
-      var sameNameArray = {};
-      for (var i = 0, imax = xmlElement.children.length; i < imax; i++) {
-        var children = xmlElement.children[i];
-
-        if (children.tagName[0] !== "_") {
-          if (json[children.tagName]) {
-            if (!sameNameArray[children.tagName]) {
-              json[children.tagName] = [json[children.tagName]];
-              sameNameArray[children.tagName] = true;
-            }
-            json[children.tagName].push(xmlElement2JsonObject(children));
-          } else {
-            json[children.tagName] = xmlElement2JsonObject(children);
-            sameNameArray[children.tagName] = false;
-          }
-        } else {
-          if (!sameNameArray[children.tagName]) {
-            json = [xmlElement2JsonObject(children)];
-            sameNameArray[children.tagName] = true;
-          } else {
-            json.push(xmlElement2JsonObject(children));
-          }
-        }
+  function gpxElementHandle(tag, contain, geojson) {
+    if (tag === "gpx") {
+      for (var c in contain) {
+        gpxElementHandle(c, contain[c], geojson);
       }
     } else {
-      var textContent = xmlElement.textContent;
-      var value = (!isNaN(parseFloat(textContent)) && isFinite(textContent)) ? parseFloat(textContent) : textContent;
+      var gpxDataHandle;
+      switch (tag) {
+        case "wpt":
+          gpxDataHandle = waypoint2Features;
+          break;
+        case "trk":
+          gpxDataHandle = trackpoint2Features;
+          break;
+        case "rte":
+          gpxDataHandle = route2Features;
+          break;
+      }
 
-      if (Object.keys(json).length > 0) {
-        json["#"] = value;
-      } else {
-        json = value;
+      if (gpxDataHandle) {
+        if (contain.forEach) {
+          contain.forEach(function(c) {
+            geojson.features.push(gpxDataHandle(c));
+          });
+        } else {
+          geojson.features.push(gpxDataHandle(contain));
+        }
       }
     }
-
-    return json;
   }
 
-  //json2xml
-  GeoConvert.json2Xml = function(json, xmlName, toString) {
+  function waypoint2Features(contain) {
+    var feature = {};
+    feature.type = "Feature";
+    feature.properties = {};
+    feature.properties.name = contain.name;
+    feature.properties.cmt = contain.cmt;
+    feature.properties.desc = contain.desc;
+    feature.properties.time = contain.time;
+
+    feature.geometry = {};
+    feature.geometry.type = "Point";
+
+    var coordinates = [contain["@lon"], contain["@lat"]];
+    feature.geometry.coordinates = coordinates;
+
+    return feature;
+  }
+
+  function trackpoint2Features(contain) {
+    var feature = {};
+    feature.type = "Feature";
+    feature.properties = {};
+    feature.properties.name = contain.name;
+
+    feature.geometry = {};
+    var coordinates;
+    if (contain.trkseg && contain.trkseg.trkpt) {
+      var trkpts = contain.trkseg.trkpt;
+      if (trkpts.forEach) {
+        feature.geometry.type = "LineString";
+        coordinates = [];
+        trkpts.forEach(function(trkpt) {
+          var point = [trkpt["@lon"], trkpt["@lat"]];
+          coordinates.push(point);
+        });
+      } else {
+        feature.geometry.type = "Point";
+        coordinates = [trkpts["@lon"], trkpts["@lat"]];
+      }
+    }
+    feature.geometry.coordinates = coordinates;
+
+    return feature;
+  }
+
+  function route2Features(contain) {
+    var feature = {};
+    feature.type = "Feature";
+    feature.properties = {};
+    feature.properties.name = contain.name;
+
+    feature.geometry = {};
+    var coordinates;
+    if (contain.rtept) {
+      var rtepts = contain.rtept;
+      if (rtepts.forEach) {
+        feature.geometry.type = "LineString";
+        coordinates = [];
+        rtepts.forEach(function(trkpt) {
+          var point = [trkpt["@lon"], trkpt["@lat"]];
+          coordinates.push(point);
+        });
+      } else {
+        feature.geometry.type = "Point";
+        coordinates = [rtepts["@lon"], rtepts["@lat"]];
+      }
+    }
+    feature.geometry.coordinates = coordinates;
+
+    return feature;
+  }
+
+  //geojson2kml
+  GeoConvert.geojson2Gpx = function(json, toString) {
     //check string?
-    var jsonDoc;
+    var geojson;
 
     if (typeof json === "string") {
-      jsonDoc = JSON.parse(json);
+      geojson = JSON.parse(json);
     } else {
-      jsonDoc = json;
+      geojson = json;
     }
 
-    var docName = xmlName.trim() ? xmlName : 'root';
-    var xmlDoc = document.implementation.createDocument(null, "create");
-    var xml;
-    xml = jsonObject2XmlElement(docName, jsonDoc, xmlDoc);
+    var gpxjson = emptyGpxjson();
+    var waypoint = [];
+    var route = [];
+    waypoint.sameName = true;
+    route.sameName = true;
+
+    if (geojson.type !== "Feature" && geojson.type !== "FeatureCollection") {
+      geojson = {
+        type: "Feature",
+        geometry: geojson,
+        properties: {}
+      };
+    }
+
+    geojsonElementHandle(geojson, waypoint, route);
+    gpxjson.wpt = waypoint;
+    gpxjson.rte = route;
+
+    var gpx = GeoConvert.json2Xml(gpxjson, 'gpx');
 
     if (toString) {
-      var xmlString = "<?xml version='1.0' encoding='UTF-8'?>" + (new XMLSerializer()).serializeToString(xml);
-      return xmlString;
+      var gpxString = "<?xml version='1.0' encoding='UTF-8'?>" + (new XMLSerializer()).serializeToString(gpx);
+      return gpxString;
     } else {
-      return xml;
+      return gpx;
     }
   };
 
-  function jsonObject2XmlElement(name, json, xmlDoc) {
-    var xml = xmlDoc.createElement(name);
+  function emptyGpxjson() {
+    var gpxjson = {};
+    gpxjson["@xmlns"] = "http://www.topografix.com/GPX/1/1";
+    gpxjson["@version"] = "1.1";
+    gpxjson["@creator"] = "GeoConvert";
 
-    if (json.forEach) {
-      json.forEach(function(child) {
-        var element = jsonObject2XmlElement('_array', child, xmlDoc);
-        xml.appendChild(element);
-      });
-    } else if (typeof json === "object") {
-      for (var key in json) {
-        if (key[0] === "@") {
-          var name = key.replace("@", "");
+    gpxjson.metadata = {};
+    gpxjson.metadata.name = "Geojson to GPX";
 
-          xml.setAttribute(name, json[key]);
-        } else if (key === "#") {
-          xml.textContent = json[key];
-        } else {
-          if (typeof json[key] !== "object") {
-            var element = xmlDoc.createElement(key);
-            element.textContent = json[key];
-            xml.appendChild(element);
-          } else {
-            if (json[key].forEach && json[key].sameName) {
-              json[key].forEach(function(child) {
-                var element = jsonObject2XmlElement(key, child, xmlDoc);
-                xml.appendChild(element);
-              });
-            } else {
-              var element = jsonObject2XmlElement(key, json[key], xmlDoc);
-              xml.appendChild(element);
-            }
-          }
-        }
-      }
-    } else {
-      xml.textContent = json;
+    return gpxjson;
+  }
+
+  function geojsonElementHandle(gObject, waypoint, route, properties) {
+    switch (gObject.type) {
+      case "Point":
+        var wpt = point2Waypoint(gObject.coordinates);
+        wpt.name = properties.name ? properties.name : "";
+        waypoint.push(wpt);
+        break;
+      case "LineString":
+        var rte = lineString2Route(gObject.coordinates);
+        rte.name = properties.name ? properties.name : "";
+        route.push(rte);
+        break;
+      case "MultiPoint":
+      case "MultiLineString":
+        var type = gObject.type.replace("Multi", "");
+        gObject.coordinates.forEach(function(coordinates) {
+          geojsonElementHandle({
+            type: type,
+            coordinates: coordinates
+          }, waypoint, route, properties);
+        });
+        break;
+      case "GeometryCollection":
+        gObject.geometries.forEach(function(geometry) {
+          geojsonElementHandle(geometry, waypoint, route, properties);
+        });
+        break;
+      case "Feature":
+        geojsonElementHandle(gObject.geometry, waypoint, route, gObject.properties);
+        break;
+      case "FeatureCollection":
+        gObject.features.forEach(function(feature) {
+          geojsonElementHandle(feature, waypoint, route);
+        });
+        break;
     }
+  }
 
-    return xml;
+  function point2Waypoint(coordinates) {
+    var waypoint = {};
+    waypoint["@lon"] = coordinates[0];
+    waypoint["@lat"] = coordinates[1];
+
+    return waypoint;
+  }
+
+  function lineString2Route(coordinates) {
+    var route = {};
+    route.rtept = [];
+    route.rtept.sameName = true;
+    coordinates.forEach(function(coordinates) {
+      var rtept = {};
+      rtept["@lon"] = coordinates[0];
+      rtept["@lat"] = coordinates[1];
+      route.rtept.push(rtept);
+    });
+
+    return route;
   }
 })(window, document);
 ;
@@ -903,245 +1590,6 @@ GeoConvert.decode.big5 = new TextDecoder("big5");
 })(window, document);
 ;
 (function(window, document, undefined) {
-  //gpx2geojson
-  GeoConvert.gpx2Geojson = function(gpx, toString) {
-    var json;
-
-    if (typeof gpx === "string") {
-      json = GeoConvert.xml2Json(gpx);
-    } else if (typeof gpx === "object" && gpx.xmlVersion) {
-      json = GeoConvert.xml2Json(gpx);
-    } else {
-      throw new Error("Unsupported input type");
-    }
-
-    var geojson = GeoConvert.emptyGeojson();
-    gpxElementHandle("gpx", json.gpx, geojson);
-
-    if (toString) {
-      var jsonString = JSON.stringify(geojson);
-      return jsonString;
-    } else {
-      return geojson;
-    }
-  };
-
-  function gpxElementHandle(tag, contain, geojson) {
-    if (tag === "gpx") {
-      for (var c in contain) {
-        gpxElementHandle(c, contain[c], geojson);
-      }
-    } else {
-      var gpxDataHandle;
-      switch (tag) {
-        case "wpt":
-          gpxDataHandle = waypoint2Features;
-          break;
-        case "trk":
-          gpxDataHandle = trackpoint2Features;
-          break;
-        case "rte":
-          gpxDataHandle = route2Features;
-          break;
-      }
-
-      if (gpxDataHandle) {
-        if (contain.forEach) {
-          contain.forEach(function(c) {
-            geojson.features.push(gpxDataHandle(c));
-          });
-        } else {
-          geojson.features.push(gpxDataHandle(contain));
-        }
-      }
-    }
-  }
-
-  function waypoint2Features(contain) {
-    var feature = {};
-    feature.type = "Feature";
-    feature.properties = {};
-    feature.properties.name = contain.name;
-    feature.properties.cmt = contain.cmt;
-    feature.properties.desc = contain.desc;
-    feature.properties.time = contain.time;
-
-    feature.geometry = {};
-    feature.geometry.type = "Point";
-
-    var coordinates = [contain["@lon"], contain["@lat"]];
-    feature.geometry.coordinates = coordinates;
-
-    return feature;
-  }
-
-  function trackpoint2Features(contain) {
-    var feature = {};
-    feature.type = "Feature";
-    feature.properties = {};
-    feature.properties.name = contain.name;
-
-    feature.geometry = {};
-    var coordinates;
-    if (contain.trkseg && contain.trkseg.trkpt) {
-      var trkpts = contain.trkseg.trkpt;
-      if (trkpts.forEach) {
-        feature.geometry.type = "LineString";
-        coordinates = [];
-        trkpts.forEach(function(trkpt) {
-          var point = [trkpt["@lon"], trkpt["@lat"]];
-          coordinates.push(point);
-        });
-      } else {
-        feature.geometry.type = "Point";
-        coordinates = [trkpts["@lon"], trkpts["@lat"]];
-      }
-    }
-    feature.geometry.coordinates = coordinates;
-
-    return feature;
-  }
-
-  function route2Features(contain) {
-    var feature = {};
-    feature.type = "Feature";
-    feature.properties = {};
-    feature.properties.name = contain.name;
-
-    feature.geometry = {};
-    var coordinates;
-    if (contain.rtept) {
-      var rtepts = contain.rtept;
-      if (rtepts.forEach) {
-        feature.geometry.type = "LineString";
-        coordinates = [];
-        rtepts.forEach(function(trkpt) {
-          var point = [trkpt["@lon"], trkpt["@lat"]];
-          coordinates.push(point);
-        });
-      } else {
-        feature.geometry.type = "Point";
-        coordinates = [rtepts["@lon"], rtepts["@lat"]];
-      }
-    }
-    feature.geometry.coordinates = coordinates;
-
-    return feature;
-  }
-
-  //geojson2kml
-  GeoConvert.geojson2Gpx = function(json, toString) {
-    //check string?
-    var geojson;
-
-    if (typeof json === "string") {
-      geojson = JSON.parse(json);
-    } else {
-      geojson = json;
-    }
-
-    var gpxjson = emptyGpxjson();
-    var waypoint = [];
-    var route = [];
-    waypoint.sameName = true;
-    route.sameName = true;
-
-    if (geojson.type !== "Feature" && geojson.type !== "FeatureCollection") {
-      geojson = {
-        type: "Feature",
-        geometry: geojson,
-        properties: {}
-      };
-    }
-
-    geojsonElementHandle(geojson, waypoint, route);
-    gpxjson.wpt = waypoint;
-    gpxjson.rte = route;
-
-    var gpx = GeoConvert.json2Xml(gpxjson, 'gpx');
-
-    if (toString) {
-      var gpxString = "<?xml version='1.0' encoding='UTF-8'?>" + (new XMLSerializer()).serializeToString(gpx);
-      return gpxString;
-    } else {
-      return gpx;
-    }
-  };
-
-  function emptyGpxjson() {
-    var gpxjson = {};
-    gpxjson["@xmlns"] = "http://www.topografix.com/GPX/1/1";
-    gpxjson["@version"] = "1.1";
-    gpxjson["@creator"] = "GeoConvert";
-
-    gpxjson.metadata = {};
-    gpxjson.metadata.name = "Geojson to GPX";
-
-    return gpxjson;
-  }
-
-  function geojsonElementHandle(gObject, waypoint, route, properties) {
-    switch (gObject.type) {
-      case "Point":
-        var wpt = point2Waypoint(gObject.coordinates);
-        wpt.name = properties.name ? properties.name : "";
-        waypoint.push(wpt);
-        break;
-      case "LineString":
-        var rte = lineString2Route(gObject.coordinates);
-        rte.name = properties.name ? properties.name : "";
-        route.push(rte);
-        break;
-      case "MultiPoint":
-      case "MultiLineString":
-        var type = gObject.type.replace("Multi", "");
-        gObject.coordinates.forEach(function(coordinates) {
-          geojsonElementHandle({
-            type: type,
-            coordinates: coordinates
-          }, waypoint, route, properties);
-        });
-        break;
-      case "GeometryCollection":
-        gObject.geometries.forEach(function(geometry) {
-          geojsonElementHandle(geometry, waypoint, route, properties);
-        });
-        break;
-      case "Feature":
-        geojsonElementHandle(gObject.geometry, waypoint, route, gObject.properties);
-        break;
-      case "FeatureCollection":
-        gObject.features.forEach(function(feature) {
-          geojsonElementHandle(feature, waypoint, route);
-        });
-        break;
-    }
-  }
-
-  function point2Waypoint(coordinates) {
-    var waypoint = {};
-    waypoint["@lon"] = coordinates[0];
-    waypoint["@lat"] = coordinates[1];
-
-    return waypoint;
-  }
-
-  function lineString2Route(coordinates) {
-    var route = {};
-    route.rtept = [];
-    route.rtept.sameName = true;
-    coordinates.forEach(function(coordinates) {
-      var rtept = {};
-      rtept["@lon"] = coordinates[0];
-      rtept["@lat"] = coordinates[1];
-      route.rtept.push(rtept);
-    });
-
-    return route;
-  }
-})(window, document);
-;
-(function(window, document, undefined) {
 	//dbase field type
 	var dBaseFieldType = {
 		"N": "Number",
@@ -1478,14 +1926,10 @@ GeoConvert.decode.big5 = new TextDecoder("big5");
 			//check polygon is hole?
 			//http://stackoverflow.com/questions/1165647/how-to-determine-if-a-list-of-polygon-points-are-in-clockwise-order
 			if (!prevX || !prevY) {
-				// [prevX, prevY] = [x, y];
-				prevX = x;
-				prevY = y;
+				[prevX, prevY] = [x, y];
 			}
 			checkCounterClockwise = checkCounterClockwise + (x - prevX) * (y + prevY);
-			// [prevX, prevY] = [x, y];
-			prevX = x;
-			prevY = y;
+			[prevX, prevY] = [x, y];
 
 			if (parts.indexOf(i) !== -1) {
 				coordinates.push(points);
@@ -1499,9 +1943,7 @@ GeoConvert.decode.big5 = new TextDecoder("big5");
 				points = [];
 				coordinates = [];
 				checkCounterClockwise = 0;
-				// [prevX, prevY] = [null, null];
-				prevX = null;
-				prevY = null;
+				[prevX, prevY] = [null, null];
 			}
 		}
 
@@ -1578,610 +2020,164 @@ GeoConvert.decode.big5 = new TextDecoder("big5");
 })(window, document);
 ;
 (function(window, document, undefined) {
-	//code index
-	var codeIndex = {
-		"1": "text",
-		"2": "name",
-		"5": "handle",
-		"6": "linetypeName",
-		"7": "textStyleName",
-		"8": "layerName",
-		"10": "lowerLeftCorner",
-		"11": "upperRightCorner",
-		"12": "centerDcs",
-		"13": "snapBasePoint",
-		"14": "snapSpacing",
-		"15": "gridSpacing",
-		"16": "viewDirectionFromTarget",
-		"17": "viewTarget",
-		"39": "thickness",
-		"48": "linetypeScale",
-		"50": "textRotation",
-		"51": "textOblique",
-		"60": "visibility",
-		"62": "colorNumber",
-		"70": "closed"
-	};
 
-
-	//dxf2Geojson. file is dxf text.
-	GeoConvert.dxf2Geojson = function(file, toString) {
-		var geojson = dxfHandle(file);
-
-		if (toString) {
-			var jsonString = JSON.stringify(geojson);
-			return jsonString;
-		} else {
-			return geojson;
-		}
-	};
-
-	function Transitions(fromProjection, toProjection) {
-		this.fromProjection = fromProjection;
-		this.toProjection = toProjection;
-	}
-
-	Transitions.prototype.trans = function(coordinates) {
-		return proj4(this.fromProjection, this.toProjection, coordinates);
-	}
-
-	function dxfHandle(file) {
-		if (file.dxf !== undefined) {
-			var geojson = GeoConvert.emptyGeojson();
-
-			//prj
-			var projection = file.prj;
-			var transitions = projection && !/GCS_WGS_1984|WGS84/g.test(projection) ? new Transitions(projection, proj4.WGS84) : transitions;
-
-			//dxf
-			var dxf = readDxfText(file.dxf);
-
-			//geojson
-			var geojson = dxfObject2Geojson(dxf, transitions);
-
-			return geojson;
-		} else {
-			throw new Error("need dxf file");
-		}
-	}
-
-	function readDxfText(dxfText) {
-		var dxfArray = dxfText.split(/\r\n|\r|\n/g);
-		var dxf = {};
-
-		// HEADER
-		var headerStart = dxfArray.indexOf("HEADER");
-		var headerEnd = dxfArray.indexOf("ENDSEC", headerStart) + 1;
-		var headerArray = dxfArray.slice(headerStart, headerEnd);
-		dxf.header = readDxfHeader(headerArray);
-
-		// TABLES
-		var tablesStart = dxfArray.indexOf("TABLES");
-		var tablesEnd = dxfArray.indexOf("ENDSEC", tablesStart) + 1;
-		var tablesArray = dxfArray.slice(tablesStart, tablesEnd);
-		dxf.tables = readDxfTables(tablesArray);
-
-		// BLOCKS
-		var blocksStart = dxfArray.indexOf("BLOCKS");
-		var blocksEnd = dxfArray.indexOf("ENDSEC", blocksStart) + 1;
-		var blocksArray = dxfArray.slice(blocksStart, blocksEnd);
-		dxf.blocks = readDxfBlocks(blocksArray);
-
-		// ENTITIES
-		var entitiesStart = dxfArray.indexOf("ENTITIES");
-		var entitiesEnd = dxfArray.indexOf("ENDSEC", entitiesStart) + 1;
-		var entitiesArray = dxfArray.slice(entitiesStart, entitiesEnd);
-		dxf.entities = readDxfEntities(entitiesArray);
-
-		return dxf;
-	}
-
-	//origin point of dxf
-	function readDxfPoints(data, start, x, y, z) {
-		var points = {};
-		points.x = readGroupValue(x, data[start]);
-		points.y = readGroupValue(y, data[start + 2]);
-
-		if (z !== undefined) {
-			points.z = readGroupValue(z, data[start + 4]);
-		}
-		return points;
-	}
-
-	// //point of geojson
-	// function readDxfPoints(data, start, x, y, z) {
-	// 	var x = readGroupValue(x, data[start]);
-	// 	var y = readGroupValue(y, data[start + 2]);
-	// 	var points = [x, y];
-
-	// 	return points;
-	// }
-
-	function readDxfHeader(headerArray) {
-		var imax = headerArray.length;
-		var i = 0;
-		var header = {};
-
-		while (i < imax) {
-			var code = headerArray[i].trim();
-			if (code === "9") {
-				var key = headerArray[i + 1];
-				var valueCode = headerArray[i + 2].trim();
-				if (valueCode === "10") {
-					var points = {};
-					var start = i + 3;
-					if (headerArray[i + 6].trim() === "30") {
-						points = readDxfPoints(headerArray, start, 10, 20, 30);;
-						i = i + 8;
-					} else {
-						points = readDxfPoints(headerArray, start, 10, 20);
-						i = i + 6;
-					}
-					header[key] = points;
-				} else {
-					header[key] = readGroupValue(parseInt(valueCode), headerArray[i + 3]);
-					i = i + 4;
-				}
-			} else {
-				i++;
-			}
-		}
-
-		return header;
-	}
-
-	function readDxfTable(tableArray, index) {
-		var length = tableArray.length - 2;
-		var table = {};
-		var code, value, name;
-
-		while (index < length) {
-			code = tableArray[index].trim();
-			value = tableArray[index + 1].trim();
-
-			switch (code) {
-				case "0":
-					var start = index + 2;
-					var end = tableArray.indexOf(name, start) + 1 || length;
-					var children = tableArray.slice(start, end - 2);
-					table[value] = table[value] || [];
-					table[value].push(readDxfTable(children, 0));
-					index = end - 4;
-					break;
-				case "2":
-					name = value;
-					table.name = value;
-					break;
-				case "3":
-					table.description = value;
-					break;
-				case "5":
-					table.handle = value;
-					break;
-				case "10":
-				case "11":
-				case "12":
-				case "13":
-				case "14":
-				case "15":
-					var start = index + 1;
-					var x = parseInt(code);
-					table[codeIndex[code]] = readDxfPoints(tableArray, start, x, x + 10);
-					break;
-				case "16":
-				case "17":
-					var start = index + 1;
-					var x = parseInt(code);
-					table[codeIndex[code]] = readDxfPoints(tableArray, start, x, x + 10, x + 20);
-					break;
-				case "40":
-					table.patternLength = parseFloat(value);
-					break;
-				case "49":
-					table.elements.push(parseFloat(value));
-					break;
-				case "62":
-					table.color = parseInt(value);
-					break;
-				case "73":
-					table.elements = [];
-					break;
-				case "330":
-				case "360":
-					table.ownerHandle = value;
-					break;
-			}
-			index = index + 2;
-		}
-		return table;
-	}
-
-	function readDxfTables(tablesArray) {
-		var imax = tablesArray.length;
-		var i = 0;
-		var tables = {};
-
-		while (i < imax) {
-			var tableStart = tablesArray.indexOf("TABLE", i);
-			var tableEnd = tablesArray.indexOf("ENDTAB", tableStart) + 1;
-
-			if (tableEnd !== 0) {
-				var tableArray = tablesArray.slice(tableStart, tableEnd);
-				tables[tablesArray[tableStart + 2]] = readDxfTable(tableArray, 1);
-				i = tableEnd;
-			} else {
-				i = imax + 1;
-			}
-		}
-
-		return tables;
-	}
-
-	function readDxfBlock(blockArray, index) {
-		var length = blockArray.length - 2;
-		var block = {};
-		var code, value;
-
-		while (index < length) {
-			code = blockArray[index].trim();
-			value = blockArray[index + 1].trim();
-
-			switch (code) {
-				case "0":
-					var end = blockArray.indexOf("  0", index + 2) + 1 || length;
-					var children = blockArray.slice(index, end - 1);
-
-					block.entities = block.entities || [];
-					block.entities.push(readDxfEntity(children, 0));
-					index = end - 3;
-					break;
-				case "1":
-					block.xrefName = value;
-					break;
-				case "2":
-					block.name = value;
-					break;
-				case "3":
-					block.blockName = value;
-					break;
-				case "5":
-					block.handle = value;
-					break;
-				case "8":
-					block.layerName = value;
-					break;
-				case "10":
-					var start = index + 1;
-					block.basePoint = readDxfPoints(blockArray, start, 10, 20, 30);
-					break;
-				case "330":
-					block.ownerHandle = value;
-					break;
-				case "360":
-					table.ownerHandle = value;
-					break;
-			}
-
-			index = index + 2;
-		}
-		return block;
-	}
-
-	function readDxfBlocks(blocksArray) {
-		var imax = blocksArray.length;
-		var i = 0;
-		var blocks = {};
-
-		while (i < imax) {
-			var blockStart = blocksArray.indexOf("BLOCK", i);
-			var blockEnd = blocksArray.indexOf("ENDBLK", blockStart) + 1;
-
-			if (blockEnd !== 0) {
-				var blockArray = blocksArray.slice(blockStart, blockEnd);
-
-				block = readDxfBlock(blockArray, 1);
-				blocks[block.blockName] = block;
-				i = blockEnd;
-			} else {
-				i = imax + 1;
-			}
-		}
-
-		return blocks;
-	}
-
-	function readDxfEntity(entityArray, index) {
-		var length = entityArray.length;
-		var entity = {};
-		var code, value, type;
-		var edgeType = false;
-
-		while (index < length) {
-			code = entityArray[index].trim();
-			value = entityArray[index + 1].trim();
-
-			switch (code) {
-				case "0":
-					type = value;
-					entity.entityType = value;
-					break;
-				case "1":
-				case "5":
-				case "6":
-				case "7":
-				case "8":
-					entity[codeIndex[code]] = value;
-					break;
-				case "10":
-					var start = index + 1;
-					switch (type) {
-						case "HATCH":
-							if (edgeType) {
-								var vertices = entity.multiVertices[entity.multiVertices.length - 1];
-								if (entity.verticesNumber > vertices.length) {
-									var point = readDxfPoints(entityArray, start, 10, 20);
-									var lastPoint = vertices[vertices.length - 1];
-									if (lastPoint === undefined || (lastPoint.x !== point.x && lastPoint.y !== point.y)) {
-										vertices.push(point);
-									}
-								}
-							}
-							break;
-						case "LWPOLYLINE":
-							entity.vertices = entity.vertices || [];
-							entity.vertices.push(readDxfPoints(entityArray, start, 10, 20));
-							break;
-						case "POINT":
-						case "MTEXT":
-						case "XLINE":
-							entity.point = readDxfPoints(entityArray, start, 10, 20, 30);
-							break;
-						case "TEXT":
-						case "LINE":
-							entity.startPoint = readDxfPoints(entityArray, start, 10, 20, 30);
-							break;
-					}
-
-					break;
-				case "11":
-					var start = index + 1;
-					switch (type) {
-						case "HATCH":
-							if (edgeType) {
-								var vertices = entity.multiVertices[entity.multiVertices.length - 1];
-								vertices.push(readDxfPoints(entityArray, start, 11, 21));
-							}
-							edgeType = false;
-							break;
-						case "TEXT":
-						case "LINE":
-							entity.endPoint = readDxfPoints(entityArray, start, 10, 20, 30);
-							break;
-					}
-
-					break;
-				case "39":
-				case "48":
-				case "50":
-				case "51":
-					entity[codeIndex[code]] = parseFloat(value);
-					break;
-				case "40":
-					switch (type) {
-						case "TEXT":
-							entity.textHeight = parseFloat(value);
-							break;
-						case "ARC":
-						case "CIRCLE":
-							entity.radius = parseFloat(value);
-							break;
-					}
-					break;
-				case "60":
-				case "62":
-				case "70":
-					entity[codeIndex[code]] = parseInt(value);
-					break;
-				case "72":
-					if (value === "1" || value === "0") {
-						edgeType = true;
-					}
-					break;
-				case "91":
-					entity.multiVertices = [];
-					break;
-				case "93":
-					entity.verticesNumber = parseInt(value);
-					entity.multiVertices.push([]);
-					break;
-				case "330":
-					entity.ownerHandle = value;
-					break;
-			}
-
-			index = index + 2;
-		}
-		return entity;
-	}
-
-	function readDxfEntities(entitiesArray) {
-		var imax = entitiesArray.length;
-		var i = 0;
-		var entities = [];
-
-		while (i < imax) {
-			var entityStart = entitiesArray.indexOf("  0", i);
-			var entityEnd = entitiesArray.indexOf("  0", entityStart + 1);
-
-			if (entityEnd !== -1) {
-				var entityArray = entitiesArray.slice(entityStart, entityEnd);
-
-				entity = readDxfEntity(entityArray, 0);
-				entities.push(entity);
-				i = entityEnd;
-			} else {
-				i = imax + 1;
-			}
-		}
-
-		return entities;
-	}
-
-	function readGroupValue(code, value) {
-		if (code <= 9) {
-			return value;
-		} else if (code >= 10 && code <= 59) {
-			return parseFloat(value);
-		} else if (code >= 60 && code <= 99) {
-			return parseInt(value);
-		} else if (code >= 100 && code <= 109) {
-			return value;
-		} else if (code >= 110 && code <= 149) {
-			return parseFloat(value);
-		} else if (code >= 160 && code <= 179) {
-			return parseInt(value);
-		} else if (code >= 210 && code <= 239) {
-			return parseFloat(value);
-		} else if (code >= 270 && code <= 289) {
-			return parseInt(value);
-		} else if (code >= 290 && code <= 299) {
-			return !!parseInt(value);
-		} else if (code >= 300 && code <= 369) {
-			return value;
-		} else if (code >= 370 && code <= 389) {
-			return parseInt(value);
-		} else if (code >= 390 && code <= 399) {
-			return value;
-		} else if (code >= 400 && code <= 409) {
-			return parseInt(value);
-		} else if (code >= 410 && code <= 419) {
-			return value;
-		} else if (code >= 420 && code <= 429) {
-			return parseInt(value);
-		} else if (code >= 430 && code <= 439) {
-			return value;
-		} else if (code >= 440 && code <= 459) {
-			return parseInt(value);
-		} else if (code >= 460 && code <= 469) {
-			return parseFloat(value);
-		} else if (code >= 470 && code <= 481) {
-			return value;
-		} else if (code === 999) {
-			return value;
-		} else if (code >= 1000 && code <= 1009) {
-			return value;
-		} else if (code >= 1010 && code <= 1059) {
-			return parseFloat(value);
-		} else if (code >= 1060 && code <= 1071) {
-			return parseInt(value);
-		} else {
-			return value;
-		}
-	}
-
-	function dxf2GeojsonPoint(point, transitions) {
-		var point = transitions ? transitions.trans([point.x, point.y]) : [point.x, point.y];
-		return point;
-	}
-
-	function dxf2GeojsonPolyline(polyline, transitions) {
-		var lineString = [];
-		if (polyline === undefined)
-			var cc = 123;
-		polyline.forEach(function(point) {
-			lineString.push(dxf2GeojsonPoint(point, transitions));
-		});
-		return lineString;
-	}
-
-	function dxfEntity2Feature(entity, transitions) {
-		var geometry = {};
-		switch (entity.entityType) {
-			case "ARC":
-				break;
-			case "CIRCLE":
-				break;
-			case "INSERT":
-				break;
-			case "TEXT":
-				geometry.type = "Point";
-				geometry.coordinates = dxf2GeojsonPoint(entity.startPoint, transitions);
-				break;
-			case "LINE":
-				geometry.type = "LineString";
-				geometry.coordinates = dxf2GeojsonPolyline([entity.startPoint, entity.endPoint], transitions);
-				break;
-			case "LWPOLYLINE":
-				geometry.type = "LineString";
-				geometry.coordinates = dxf2GeojsonPolyline(entity.vertices, transitions);
-				if (entity.closed === 1) {
-					geometry.coordinates.push(geometry.coordinates[0]);
-				}
-				break;
-			case "HATCH":
-				geometry.type = "Polygon";
-				geometry.coordinates = [];
-				entity.multiVertices.forEach(function(vertices) {
-					var coordinates = dxf2GeojsonPolyline(vertices, transitions);
-					coordinates.push(coordinates[0]);
-					geometry.coordinates.push(coordinates);
-				});
-				break;
-			default:
-				break;
-		}
-
-		if (geometry.type !== undefined) {
-			var feature = {};
-			feature.type = "Feature";
-			feature.geometry = geometry;
-			feature.properties = {};
-			feature.style = {};
-
-			[
-				"text",
-				"textHeight",
-				"textStyleName",
-				"layerName",
-				"entityType"
-			].forEach(function(name) {
-				if (entity[name] !== undefined) {
-					feature.properties[name] = entity[name];
-				}
-			});
-
-			return feature;
-		}
-	}
-
-	function dxfObject2Geojson(dxf, transitions) {
-		console.log(dxf);
-
-		var geojson = GeoConvert.emptyGeojson();
-
-		//blocks
-		for (var key in dxf.blocks) {
-			var block = dxf.blocks[key];
-			var entities = block.entities;
-
-			if (entities !== undefined) {
-				entities.forEach(function(entity) {
-					var feature = dxfEntity2Feature(entity, transitions);
-					if (feature !== undefined) {
-						geojson.features.push(feature);
-					}
-				});
-			}
-		}
-
-		//entities
-		dxf.entities.forEach(function(entity) {
-			var feature = dxfEntity2Feature(entity, transitions);
-			if (feature !== undefined) {
-				geojson.features.push(feature);
-			}
-		});
-
-		return geojson;
-	}
+  //xml2json
+  GeoConvert.xml2Json = function(xml, toString) {
+    //xml string parser
+    var parseXml;
+
+    if (window.DOMParser) {
+      parseXml = function(xmlStr) {
+        return (new window.DOMParser()).parseFromString(xmlStr, "text/xml");
+      };
+    } else if (typeof window.ActiveXObject != "undefined" && new window.ActiveXObject("Microsoft.XMLDOM")) {
+      parseXml = function(xmlStr) {
+        var xmlDoc = new window.ActiveXObject("Microsoft.XMLDOM");
+        xmlDoc.async = "false";
+        xmlDoc.loadXML(xmlStr);
+        return xmlDoc;
+      };
+    } else {
+      parseXml = function() {
+        return null;
+      }
+    }
+
+    //check string?
+    var xmlDoc;
+
+    if (typeof xml === "string") {
+      xmlDoc = parseXml(xml);
+    } else if (typeof xml === "object" && xml.xmlVersion) {
+      xmlDoc = xml;
+    } else {
+      throw new Error("Unsupported input type");
+    }
+
+    var json = xmlElement2JsonObject(xmlDoc);
+
+    if (toString) {
+      var jsonString = JSON.stringify(json);
+      return jsonString;
+    } else {
+      return json;
+    }
+  };
+
+  function xmlElement2JsonObject(xmlElement) {
+    var json = {};
+
+    if (xmlElement.attributes) {
+      for (var i = 0, imax = xmlElement.attributes.length; i < imax; i++) {
+        var attribute = xmlElement.attributes[i];
+        var nodeValue = attribute.nodeValue;
+        var value = (!isNaN(parseFloat(nodeValue)) && isFinite(nodeValue)) ? parseFloat(nodeValue) : nodeValue;
+        json["@" + attribute.nodeName] = value;
+      }
+    }
+
+    if (xmlElement.children.length > 0) {
+      var sameNameArray = {};
+      for (var i = 0, imax = xmlElement.children.length; i < imax; i++) {
+        var children = xmlElement.children[i];
+
+        if (children.tagName[0] !== "_") {
+          if (json[children.tagName]) {
+            if (!sameNameArray[children.tagName]) {
+              json[children.tagName] = [json[children.tagName]];
+              sameNameArray[children.tagName] = true;
+            }
+            json[children.tagName].push(xmlElement2JsonObject(children));
+          } else {
+            json[children.tagName] = xmlElement2JsonObject(children);
+            sameNameArray[children.tagName] = false;
+          }
+        } else {
+          if (!sameNameArray[children.tagName]) {
+            json = [xmlElement2JsonObject(children)];
+            sameNameArray[children.tagName] = true;
+          } else {
+            json.push(xmlElement2JsonObject(children));
+          }
+        }
+      }
+    } else {
+      var textContent = xmlElement.textContent;
+      var value = (!isNaN(parseFloat(textContent)) && isFinite(textContent)) ? parseFloat(textContent) : textContent;
+
+      if (Object.keys(json).length > 0) {
+        json["#"] = value;
+      } else {
+        json = value;
+      }
+    }
+
+    return json;
+  }
+
+  //json2xml
+  GeoConvert.json2Xml = function(json, xmlName, toString) {
+    //check string?
+    var jsonDoc;
+
+    if (typeof json === "string") {
+      jsonDoc = JSON.parse(json);
+    } else {
+      jsonDoc = json;
+    }
+
+    var docName = xmlName.trim() ? xmlName : 'root';
+    var xmlDoc = document.implementation.createDocument(null, "create");
+    var xml;
+    xml = jsonObject2XmlElement(docName, jsonDoc, xmlDoc);
+
+    if (toString) {
+      var xmlString = "<?xml version='1.0' encoding='UTF-8'?>" + (new XMLSerializer()).serializeToString(xml);
+      return xmlString;
+    } else {
+      return xml;
+    }
+  };
+
+  function jsonObject2XmlElement(name, json, xmlDoc) {
+    var xml = xmlDoc.createElement(name);
+
+    if (json.forEach) {
+      json.forEach(function(child) {
+        var element = jsonObject2XmlElement('_array', child, xmlDoc);
+        xml.appendChild(element);
+      });
+    } else if (typeof json === "object") {
+      for (var key in json) {
+        if (key[0] === "@") {
+          var name = key.replace("@", "");
+
+          xml.setAttribute(name, json[key]);
+        } else if (key === "#") {
+          xml.textContent = json[key];
+        } else {
+          if (typeof json[key] !== "object") {
+            var element = xmlDoc.createElement(key);
+            element.textContent = json[key];
+            xml.appendChild(element);
+          } else {
+            if (json[key].forEach && json[key].sameName) {
+              json[key].forEach(function(child) {
+                var element = jsonObject2XmlElement(key, child, xmlDoc);
+                xml.appendChild(element);
+              });
+            } else {
+              var element = jsonObject2XmlElement(key, json[key], xmlDoc);
+              xml.appendChild(element);
+            }
+          }
+        }
+      }
+    } else {
+      xml.textContent = json;
+    }
+
+    return xml;
+  }
 })(window, document);
+if (typeof module !== 'undefined') module.exports = GeoConvert;
