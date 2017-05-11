@@ -7,7 +7,7 @@
     "start": "serve -p 3310",
     "test": "gulp"
   },
-  "files": ["src", "dist"],
+  "files": ["src/", "dist/"],
   "author": "",
   "license": "ISC",
   "devDependencies": {
