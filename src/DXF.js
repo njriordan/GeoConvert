@@ -301,7 +301,7 @@
 			if (blockEnd !== 0) {
 				var blockArray = blocksArray.slice(blockStart, blockEnd);
 
-				block = readDxfBlock(blockArray, 1);
+				var block = readDxfBlock(blockArray, 1);
 				blocks[block.blockName] = block;
 				i = blockEnd;
 			} else {
@@ -438,7 +438,7 @@
 			if (entityEnd !== -1) {
 				var entityArray = entitiesArray.slice(entityStart, entityEnd);
 
-				entity = readDxfEntity(entityArray, 0);
+				var entity = readDxfEntity(entityArray, 0);
 				entities.push(entity);
 				i = entityEnd;
 			} else {
